@@ -200,6 +200,7 @@ export class StudyApp {
   private beginAction(action: PendingAction): boolean {
     if (this.pendingAction) return false;
     this.pendingAction = action;
+    this.clearPolling();
     this.armSlowRequestTimer();
     this.render();
     return true;
@@ -212,6 +213,8 @@ export class StudyApp {
     if (completedAction === "next-round") this.pendingRoundTitle = "";
     this.clearSlowRequestTimer();
     this.render();
+    const [route] = routeParts();
+    if (!route || route === "exam" || route === "admin") this.startPolling();
   }
 
   private async handlePhaseSubmission(): Promise<void> {
@@ -265,6 +268,7 @@ export class StudyApp {
   }
 
   private startPolling(): void {
+    this.clearPolling();
     this.pollTimer = window.setInterval(() => void this.loadRoute(true), POLL_INTERVAL_MS);
   }
 
@@ -308,18 +312,22 @@ export class StudyApp {
   }
 
   private renderRequestFeedback(): string {
+    const optimisticCopy = this.pendingAction === "nickname"
+      ? "참가 준비는 끝났어요. 최신 시험 상태를 확인하고 있어요."
+      : this.pendingAction === "transition"
+        ? "화면을 다음 시험 단계로 먼저 바꿨어요. Google에 저장하고 있어요."
+        : this.pendingAction === "next-round"
+          ? "새 회차를 화면에 먼저 준비했어요. Google에 저장하고 있어요."
+          : "";
+    if (optimisticCopy) {
+      return `<div class="request-feedback" role="status"><span class="spinner" aria-hidden="true"></span><span>${optimisticCopy}</span></div>`;
+    }
     if (!this.slowRequest || (this.loading && !this.pendingAction)) return "";
-    const copy = this.pendingAction === "transition"
-      ? "시험 단계를 바꾸는 데 시간이 조금 걸리고 있어요. 완료될 때까지 그대로 기다려주세요."
-      : this.pendingAction === "admin-login"
+    const copy = this.pendingAction === "admin-login"
         ? "관리자 권한을 확인하고 있어요. Apps Script 응답이 평소보다 조금 늦어요."
-        : this.pendingAction === "nickname"
-          ? "참가 정보를 저장하고 있어요. Apps Script 응답이 평소보다 조금 늦어요."
-          : this.pendingAction === "retry-submit"
-            ? "답안을 다시 보내고 있어요. 입력한 답은 이 기기에 안전하게 남아 있어요."
-            : this.pendingAction === "next-round"
-              ? "다음 회차와 문제 20개를 준비하고 있어요. Apps Script 응답을 기다려주세요."
-            : "시험 데이터를 불러오는 데 시간이 조금 걸리고 있어요. 연결은 유지되고 있습니다.";
+        : this.pendingAction === "retry-submit"
+          ? "답안을 다시 보내고 있어요. 입력한 답은 이 기기에 안전하게 남아 있어요."
+          : "시험 데이터를 불러오는 데 시간이 조금 걸리고 있어요. 연결은 유지되고 있습니다.";
     return `<div class="request-feedback" role="status"><span class="spinner" aria-hidden="true"></span><span>${copy}</span></div>`;
   }
 
@@ -604,7 +612,7 @@ export class StudyApp {
         <p class="eyebrow">현재 회차</p>
         <h1>${escapeHtml(round.title)}</h1>
         <p class="lead">현재 ${phaseLabel(round.status)} 단계예요.</p>
-        ${target ? `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button" ${adminBusy ? "disabled" : ""}>${this.pendingAction === "transition" ? '<span class="spinner" aria-hidden="true"></span> 변경하고 있어요' : actionLabel[round.status]}</button>` : this.renderNextRoundForm()}
+        ${adminBusy ? "" : target ? `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button">${actionLabel[round.status]}</button>` : this.renderNextRoundForm()}
         <button class="button button--text" data-action="admin-logout" type="button" ${adminBusy ? "disabled" : ""}>관리 화면 닫기</button>
         ${this.pendingTransition ? this.renderTransitionConfirm(round, this.pendingTransition) : ""}
       </section>
@@ -705,6 +713,8 @@ export class StudyApp {
           ? this.storage.updateNickname(this.session, nickname)
           : this.storage.createSession(this.bootstrapData.currentRound.roundId, nickname);
         this.editingNickname = false;
+        this.message = "";
+        this.render();
         await this.loadRoute(true);
       } finally {
         this.finishAction();
@@ -730,13 +740,32 @@ export class StudyApp {
         this.pendingRoundTitle = "";
         return;
       }
+      const previousData = this.bootstrapData;
+      const previousSession = this.session;
+      const previousQuestionIndex = this.currentQuestionIndex;
+      this.bootstrapData = {
+        currentRound: {
+          roundId: "pending-next-round",
+          title,
+          status: "WAITING",
+          date: new Date().toISOString(),
+          questionCount: 20,
+        },
+        questions: [],
+        eligibleForRetest: false,
+      };
+      this.session = null;
+      this.currentQuestionIndex = 0;
+      this.pendingTransition = null;
+      this.message = "";
+      this.render();
       try {
         this.bootstrapData = await this.api.createNextRound(title, adminToken);
-        this.session = null;
-        this.currentQuestionIndex = 0;
-        this.pendingTransition = null;
         this.message = "다음 회차가 준비됐어요. 참가자가 대기한 뒤 1차 시험을 시작해주세요.";
       } catch (error) {
+        this.bootstrapData = previousData;
+        this.session = previousSession;
+        this.currentQuestionIndex = previousQuestionIndex;
         const apiError = error as StudyApiError;
         if (apiError.code === "ADMIN_TOKEN_INVALID" || apiError.code === "ADMIN_TOKEN_EXPIRED") {
           sessionStorage.removeItem(ADMIN_TOKEN_KEY);
@@ -774,9 +803,17 @@ export class StudyApp {
   }
 
   private async performTransition(targetStatus: RoundStatus): Promise<void> {
-    const round = this.bootstrapData?.currentRound;
+    const previousData = this.bootstrapData;
+    const round = previousData?.currentRound;
     const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (!round || !adminToken) return;
+    this.bootstrapData = {
+      ...previousData,
+      currentRound: { ...round, status: targetStatus },
+    };
+    this.pendingTransition = null;
+    this.message = "";
+    this.render();
     try {
       const nextData = await this.api.transition(round.roundId, targetStatus, adminToken);
       if (shouldResetQuestionIndex(
@@ -791,6 +828,8 @@ export class StudyApp {
       this.pendingTransition = null;
       this.message = "";
     } catch (error) {
+      this.bootstrapData = previousData;
+      this.pendingTransition = targetStatus;
       const apiError = error as StudyApiError;
       if (apiError.code === "ADMIN_TOKEN_INVALID" || apiError.code === "ADMIN_TOKEN_EXPIRED") {
         sessionStorage.removeItem(ADMIN_TOKEN_KEY);
