@@ -75,7 +75,7 @@
 ## 6. GitHub Pages
 
 1. 공개 GitHub 저장소 이름을 `kbs-current-affairs-study-webapp`으로 만들고 이 프로젝트를 `main`에 푸시합니다.
-2. `VITE_API_URL=<Apps Script /exec URL> npm run build`로 운영 빌드를 만듭니다.
+2. `VITE_GITHUB_PAGES=1 VITE_API_URL=<Apps Script /exec URL> npm run build`로 운영 빌드를 만듭니다.
 3. `dist` 폴더의 결과물을 `gh-pages` 브랜치 루트에 배포합니다.
 4. 저장소 `Settings → Pages → Source`에서 `Deploy from a branch`, `gh-pages / (root)`를 선택합니다.
 5. 배포된 페이지에서 대기 화면과 관리자 로그인까지 확인합니다.
