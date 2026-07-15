@@ -19,7 +19,7 @@ describe("느린 Apps Script 응답 UI", () => {
   it("초기 시험 상태 확인 중에는 안내 문구를 하나만 표시한다", async () => {
     vi.useFakeTimers();
     vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");
-    window.location.hash = "#/exam";
+    window.history.replaceState(null, "", "#/exam");
     document.body.innerHTML = '<div id="app"></div>';
 
     let resolveBootstrap: ((response: Response) => void) | undefined;

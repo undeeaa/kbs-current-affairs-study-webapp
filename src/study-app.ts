@@ -77,6 +77,7 @@ export class StudyApp {
   private slowBackgroundRefresh = false;
   private slowRequestTimer: number | null = null;
   private slowBackgroundTimer: number | null = null;
+  private queuedForegroundLoad = false;
 
   constructor(private readonly root: HTMLDivElement) {}
 
@@ -94,7 +95,15 @@ export class StudyApp {
   }
 
   private async loadRoute(background = false): Promise<void> {
-    if (this.refreshing) return;
+    if (this.refreshing) {
+      if (!background) {
+        this.queuedForegroundLoad = true;
+        this.loading = true;
+        this.armSlowRequestTimer();
+        this.render();
+      }
+      return;
+    }
     this.refreshing = true;
     if (!background) {
       this.loading = true;
@@ -127,6 +136,11 @@ export class StudyApp {
       this.refreshing = false;
       if (!background) this.clearSlowRequestTimer();
       this.clearSlowBackgroundTimer();
+      if (this.queuedForegroundLoad) {
+        this.queuedForegroundLoad = false;
+        await this.loadRoute();
+        return;
+      }
       this.render();
     }
   }
