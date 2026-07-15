@@ -9,6 +9,10 @@ interface GasContext {
   KBS_escapeSheetText(value: string): string;
   KBS_unescapeSheetText(value: string): string;
   KBS_constantTimeEqual(left: string, right: string): boolean;
+  KBS_nextRoundCandidates(
+    questionRows: Array<Record<string, unknown>>,
+    linkRows: Array<Record<string, unknown>>,
+  ): Array<Record<string, unknown>>;
   KBS_ranking(roundId: string, total: number): Array<{ rank: number; nickname: string; score: number }>;
   KBS_responses(): { rows: Array<Record<string, unknown>> };
 }
@@ -62,5 +66,15 @@ describe("Apps Script 핵심 규칙", () => {
     expect(gas.KBS_constantTimeEqual("same", "same")).toBe(true);
     expect(gas.KBS_constantTimeEqual("same", "diff")).toBe(false);
     expect(gas.KBS_constantTimeEqual("short", "longer")).toBe(false);
+  });
+
+  it("다음 회차에는 이전에 쓰지 않은 유효한 문제만 시트 순서대로 고른다", () => {
+    const candidates = gas.KBS_nextRoundCandidates([
+      { id: "used", question: "사용한 문제", answer: "정답" },
+      { id: "next-1", question: "다음 문제 1", answer: "정답" },
+      { id: "invalid", question: "정답이 없는 문제", answer: "" },
+      { id: "next-2", question: "다음 문제 2", answer: "정답" },
+    ], [{ roundId: "round-1", questionId: "used", order: 1 }]);
+    expect(candidates.map((row) => row.id)).toEqual(["next-1", "next-2"]);
   });
 });

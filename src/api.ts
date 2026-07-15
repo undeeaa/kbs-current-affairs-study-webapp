@@ -93,4 +93,8 @@ export class StudyApi {
   transition(roundId: string, targetStatus: RoundStatus, adminToken: string): Promise<BootstrapData> {
     return this.post("transition", { roundId, targetStatus, adminToken });
   }
+
+  createNextRound(title: string, adminToken: string): Promise<BootstrapData> {
+    return this.post("createNextRound", { title, adminToken });
+  }
 }

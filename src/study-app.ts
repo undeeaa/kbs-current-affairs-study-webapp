@@ -16,7 +16,7 @@ const POLL_INTERVAL_MS = 4_000;
 const SLOW_REQUEST_MS = 1_200;
 const ADMIN_TOKEN_KEY = "kbs-study:admin-token";
 
-type PendingAction = "nickname" | "admin-login" | "transition" | "retry-submit";
+type PendingAction = "nickname" | "admin-login" | "transition" | "retry-submit" | "next-round";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -72,6 +72,7 @@ export class StudyApp {
   private pendingTransition: RoundStatus | null = null;
   private pendingAction: PendingAction | null = null;
   private pendingNickname = "";
+  private pendingRoundTitle = "";
   private slowRequest = false;
   private slowBackgroundRefresh = false;
   private slowRequestTimer: number | null = null;
@@ -194,6 +195,7 @@ export class StudyApp {
     const completedAction = this.pendingAction;
     this.pendingAction = null;
     if (completedAction === "nickname") this.pendingNickname = "";
+    if (completedAction === "next-round") this.pendingRoundTitle = "";
     this.clearSlowRequestTimer();
     this.render();
   }
@@ -301,6 +303,8 @@ export class StudyApp {
           ? "참가 정보를 저장하고 있어요. Apps Script 응답이 평소보다 조금 늦어요."
           : this.pendingAction === "retry-submit"
             ? "답안을 다시 보내고 있어요. 입력한 답은 이 기기에 안전하게 남아 있어요."
+            : this.pendingAction === "next-round"
+              ? "다음 회차와 문제 20개를 준비하고 있어요. Apps Script 응답을 기다려주세요."
             : "시험 데이터를 불러오는 데 시간이 조금 걸리고 있어요. 연결은 유지되고 있습니다.";
     return `<div class="request-feedback" role="status"><span class="spinner" aria-hidden="true"></span><span>${copy}</span></div>`;
   }
@@ -574,7 +578,7 @@ export class StudyApp {
     const round = this.bootstrapData?.currentRound;
     if (!round) return this.renderEmpty("관리할 회차가 없어요", "시트에서 새 회차를 준비해주세요.");
     const target = nextStatus(round.status) as RoundStatus | null;
-    const transitionBusy = this.pendingAction === "transition";
+    const adminBusy = this.pendingAction === "transition" || this.pendingAction === "next-round";
     const actionLabel: Record<RoundStatus, string> = {
       WAITING: "1차 시험 시작",
       FIRST_TEST: "1차 시험 종료",
@@ -587,10 +591,27 @@ export class StudyApp {
         <p class="eyebrow">현재 회차</p>
         <h1>${escapeHtml(round.title)}</h1>
         <p class="lead">현재 ${phaseLabel(round.status)} 단계예요.</p>
-        ${target ? `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button" ${transitionBusy ? "disabled" : ""}>${transitionBusy ? '<span class="spinner" aria-hidden="true"></span> 변경하고 있어요' : actionLabel[round.status]}</button>` : '<p class="status-meta">이 회차의 시험이 모두 끝났어요.</p>'}
-        <button class="button button--text" data-action="admin-logout" type="button" ${transitionBusy ? "disabled" : ""}>관리 화면 닫기</button>
+        ${target ? `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button" ${adminBusy ? "disabled" : ""}>${this.pendingAction === "transition" ? '<span class="spinner" aria-hidden="true"></span> 변경하고 있어요' : actionLabel[round.status]}</button>` : this.renderNextRoundForm()}
+        <button class="button button--text" data-action="admin-logout" type="button" ${adminBusy ? "disabled" : ""}>관리 화면 닫기</button>
         ${this.pendingTransition ? this.renderTransitionConfirm(round, this.pendingTransition) : ""}
       </section>
+    `;
+  }
+
+  private renderNextRoundForm(): string {
+    const busy = this.pendingAction === "next-round";
+    const suggestedTitle = `${formatDate(new Date().toISOString())} 시사상식 시험`;
+    return `
+      <form class="stack next-round-panel" data-form="next-round">
+        <div>
+          <h2>다음 회차를 준비할까요?</h2>
+          <p>아직 출제하지 않은 문제 중 20개를 시트 순서대로 구성해요.</p>
+        </div>
+        <label class="field-label" for="next-round-title">회차 제목</label>
+        <input id="next-round-title" name="title" maxlength="80" required ${busy ? "disabled" : ""}
+          value="${escapeHtml(this.pendingRoundTitle || suggestedTitle)}" />
+        <button class="button button--primary" type="submit" ${busy ? "disabled" : ""}>${busy ? '<span class="spinner" aria-hidden="true"></span> 준비하고 있어요' : "다음 회차 준비하기"}</button>
+      </form>
     `;
   }
 
@@ -684,6 +705,30 @@ export class StudyApp {
         this.message = "";
       } catch (error) {
         this.message = this.friendlyError(error, "관리자 코드를 확인해주세요.");
+      } finally {
+        this.finishAction();
+      }
+    } else if (form.dataset.form === "next-round") {
+      const title = String(formData.get("title") ?? "").trim();
+      const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
+      if (!title || title.length > 80 || !adminToken) return;
+      this.pendingRoundTitle = title;
+      if (!this.beginAction("next-round")) {
+        this.pendingRoundTitle = "";
+        return;
+      }
+      try {
+        this.bootstrapData = await this.api.createNextRound(title, adminToken);
+        this.session = null;
+        this.currentQuestionIndex = 0;
+        this.pendingTransition = null;
+        this.message = "다음 회차가 준비됐어요. 참가자가 대기한 뒤 1차 시험을 시작해주세요.";
+      } catch (error) {
+        const apiError = error as StudyApiError;
+        if (apiError.code === "ADMIN_TOKEN_INVALID" || apiError.code === "ADMIN_TOKEN_EXPIRED") {
+          sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+        }
+        this.message = this.friendlyError(error);
       } finally {
         this.finishAction();
       }

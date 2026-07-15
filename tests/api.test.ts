@@ -30,4 +30,22 @@ describe("API 계약", () => {
       retryable: false,
     } satisfies Partial<StudyApiError>);
   });
+
+  it("다음 회차 제목과 관리자 토큰을 생성 요청으로 보낸다", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: { currentRound: null, questions: [], eligibleForRetest: false },
+        serverTime: "now",
+      })),
+    );
+    const api = new StudyApi("https://script.google.com/macros/s/example/exec");
+    await api.createNextRound("제2회 시사상식 시험", "admin-token");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      action: "createNextRound",
+      title: "제2회 시사상식 시험",
+      adminToken: "admin-token",
+    });
+  });
 });

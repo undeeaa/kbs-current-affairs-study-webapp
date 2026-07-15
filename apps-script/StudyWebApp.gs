@@ -67,6 +67,8 @@ function KBS_handlePost(e) {
       data = KBS_adminLogin(KBS_string(body.code));
     } else if (action === "transition") {
       data = KBS_transition(body);
+    } else if (action === "createNextRound") {
+      data = KBS_createNextRound(body);
     } else {
       throw KBS_error("UNKNOWN_ACTION", "요청한 기능을 찾을 수 없어요.", false);
     }
@@ -543,6 +545,79 @@ function KBS_transition(body) {
     table.sheet.getRange(round._row, KBS_headerIndex(table, "status")).setValue(targetStatus);
     table.sheet.getRange(round._row, KBS_headerIndex(table, timestampHeader)).setValue(now);
     if (!round.createdAt) table.sheet.getRange(round._row, KBS_headerIndex(table, "createdAt")).setValue(now);
+    SpreadsheetApp.flush();
+    CacheService.getScriptCache().remove("round-bundle:" + roundId);
+    return KBS_bootstrap("");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function KBS_nextRoundCandidates(questionRows, linkRows) {
+  var used = {};
+  linkRows.forEach(function (row) {
+    var questionId = KBS_string(row.questionId).trim();
+    if (questionId) used[questionId] = true;
+  });
+  return questionRows.filter(function (row) {
+    var questionId = KBS_string(row.id).trim();
+    return questionId && !used[questionId] &&
+      KBS_string(row.question).trim() && KBS_string(row.answer).trim();
+  });
+}
+
+function KBS_valuesForHeaders(headers, values) {
+  return headers.map(function (header) {
+    return Object.prototype.hasOwnProperty.call(values, header) ? values[header] : "";
+  });
+}
+
+function KBS_createNextRound(body) {
+  var title = KBS_string(body.title).trim();
+  KBS_verifyAdminToken(KBS_string(body.adminToken));
+  KBS_assert(title && title.length <= 80, "ROUND_TITLE_INVALID", "회차 제목을 1자 이상 80자 이하로 입력해주세요.", false);
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (error) {
+    throw KBS_error("CREATE_ROUND_BUSY", "다른 회차 작업을 처리하고 있어요. 잠시 후 다시 시도해주세요.", true);
+  }
+  try {
+    var roundTable = KBS_rounds();
+    var active = roundTable.rows.filter(function (row) { return KBS_string(row.status) !== "FINISHED"; });
+    KBS_assert(active.length === 0, "ACTIVE_ROUND_EXISTS", "이미 준비하거나 진행 중인 회차가 있어요.", false);
+
+    var questionTable = KBS_readTable(KBS_SHEETS.QUESTIONS);
+    var linkTable = KBS_readTable(KBS_SHEETS.ROUND_QUESTIONS);
+    ["id", "question", "answer"].forEach(function (header) { KBS_headerIndex(questionTable, header); });
+    ["roundId", "questionId", "order"].forEach(function (header) { KBS_headerIndex(linkTable, header); });
+    var candidates = KBS_nextRoundCandidates(questionTable.rows, linkTable.rows);
+    KBS_assert(
+      candidates.length >= 20,
+      "NOT_ENOUGH_UNUSED_QUESTIONS",
+      "아직 출제하지 않은 유효한 문제가 20개 필요해요. 현재 " + candidates.length + "개가 준비돼 있어요.",
+      false,
+    );
+
+    var now = new Date();
+    var timeZone = Session.getScriptTimeZone() || "Asia/Seoul";
+    var roundId = "round-" + Utilities.formatDate(now, timeZone, "yyyyMMdd-HHmmss") + "-" + Utilities.getUuid().slice(0, 8);
+    roundTable.sheet.appendRow(KBS_valuesForHeaders(roundTable.headers, {
+      roundId: roundId,
+      title: title,
+      status: "WAITING",
+      createdAt: now,
+    }));
+
+    var linkValues = candidates.slice(0, 20).map(function (question, index) {
+      return KBS_valuesForHeaders(linkTable.headers, {
+        roundId: roundId,
+        questionId: KBS_string(question.id),
+        order: index + 1,
+      });
+    });
+    linkTable.sheet.getRange(linkTable.sheet.getLastRow() + 1, 1, linkValues.length, linkTable.headers.length).setValues(linkValues);
     SpreadsheetApp.flush();
     CacheService.getScriptCache().remove("round-bundle:" + roundId);
     return KBS_bootstrap("");
