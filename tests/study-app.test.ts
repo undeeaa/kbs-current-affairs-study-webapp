@@ -16,6 +16,33 @@ describe("느린 Apps Script 응답 UI", () => {
     sessionStorage.clear();
   });
 
+  it("초기 시험 상태 확인 중에는 안내 문구를 하나만 표시한다", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");
+    window.location.hash = "#/exam";
+    document.body.innerHTML = '<div id="app"></div>';
+
+    let resolveBootstrap: ((response: Response) => void) | undefined;
+    vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveBootstrap = resolve; }));
+
+    const root = document.querySelector<HTMLDivElement>("#app") as HTMLDivElement;
+    const app = new StudyApp(root);
+    const start = app.start();
+
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(root.textContent).toContain("시험 상태를 확인하고 있어요");
+    expect(root.textContent).not.toContain("잠시만 기다려주세요");
+    expect(root.textContent).not.toContain("시험 데이터를 불러오는 데 시간이 조금 걸리고 있어요");
+
+    resolveBootstrap?.(envelope({
+      currentRound: null,
+      questions: [],
+      eligibleForRetest: false,
+    }));
+    await start;
+  });
+
   it("관리자 로그인 중 입력 필드와 버튼을 잠그고 지연 안내를 표시한다", async () => {
     vi.useFakeTimers();
     vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");

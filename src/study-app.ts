@@ -294,7 +294,7 @@ export class StudyApp {
   }
 
   private renderRequestFeedback(): string {
-    if (!this.slowRequest) return "";
+    if (!this.slowRequest || (this.loading && !this.pendingAction)) return "";
     const copy = this.pendingAction === "transition"
       ? "시험 단계를 바꾸는 데 시간이 조금 걸리고 있어요. 완료될 때까지 그대로 기다려주세요."
       : this.pendingAction === "admin-login"
@@ -338,7 +338,6 @@ export class StudyApp {
       <section class="status-screen" aria-live="polite">
         <span class="pulse-dot" aria-hidden="true"></span>
         <h1>시험 상태를 확인하고 있어요</h1>
-        <p>잠시만 기다려주세요.</p>
       </section>
     `;
   }
