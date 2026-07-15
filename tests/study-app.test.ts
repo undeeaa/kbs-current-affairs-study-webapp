@@ -1,0 +1,60 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { StudyApp } from "../src/study-app";
+
+function envelope(data: unknown): Response {
+  return new Response(JSON.stringify({ ok: true, data, serverTime: "now" }));
+}
+
+describe("느린 Apps Script 응답 UI", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+    window.location.hash = "";
+    document.body.innerHTML = "";
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it("관리자 로그인 중 입력 필드와 버튼을 잠그고 지연 안내를 표시한다", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");
+    window.location.hash = "#/admin";
+    document.body.innerHTML = '<div id="app"></div>';
+
+    let resolveLogin: ((response: Response) => void) | undefined;
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(envelope({
+        currentRound: {
+          roundId: "round-1",
+          title: "리허설",
+          status: "WAITING",
+          date: "2026-07-16",
+          questionCount: 20,
+        },
+        questions: [],
+        eligibleForRetest: false,
+      }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveLogin = resolve; }));
+
+    const root = document.querySelector<HTMLDivElement>("#app") as HTMLDivElement;
+    const app = new StudyApp(root);
+    await app.start();
+
+    const input = root.querySelector<HTMLInputElement>("#admin-code") as HTMLInputElement;
+    const form = root.querySelector<HTMLFormElement>('[data-form="admin-login"]') as HTMLFormElement;
+    input.value = "admin-code";
+    form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+
+    expect(root.querySelector<HTMLInputElement>("#admin-code")?.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
+    expect(root.textContent).toContain("확인하고 있어요");
+
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(root.textContent).toContain("Apps Script 응답이 평소보다 조금 늦어요");
+
+    resolveLogin?.(envelope({ adminToken: "token", expiresAt: "later" }));
+    await Promise.resolve();
+  });
+});

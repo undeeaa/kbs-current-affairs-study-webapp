@@ -1,5 +1,5 @@
 import { StudyApi, StudyApiError } from "./api";
-import { nextStatus, orderRetestQuestions } from "./domain";
+import { nextStatus, orderRetestQuestions, shouldResetQuestionIndex } from "./domain";
 import { StudyStorage } from "./storage";
 import type {
   Attempt,
@@ -13,7 +13,10 @@ import type {
 } from "./types";
 
 const POLL_INTERVAL_MS = 4_000;
+const SLOW_REQUEST_MS = 1_200;
 const ADMIN_TOKEN_KEY = "kbs-study:admin-token";
+
+type PendingAction = "nickname" | "admin-login" | "transition" | "retry-submit";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -67,6 +70,12 @@ export class StudyApp {
   private retryDelayIndex = 0;
   private openExplanations = new Set<string>();
   private pendingTransition: RoundStatus | null = null;
+  private pendingAction: PendingAction | null = null;
+  private pendingNickname = "";
+  private slowRequest = false;
+  private slowBackgroundRefresh = false;
+  private slowRequestTimer: number | null = null;
+  private slowBackgroundTimer: number | null = null;
 
   constructor(private readonly root: HTMLDivElement) {}
 
@@ -88,7 +97,10 @@ export class StudyApp {
     this.refreshing = true;
     if (!background) {
       this.loading = true;
+      this.armSlowRequestTimer();
       this.render();
+    } else if (!this.pendingAction) {
+      this.armSlowBackgroundTimer();
     }
     this.clearPolling();
     try {
@@ -112,18 +124,78 @@ export class StudyApp {
     } finally {
       this.loading = false;
       this.refreshing = false;
+      if (!background) this.clearSlowRequestTimer();
+      this.clearSlowBackgroundTimer();
       this.render();
     }
   }
 
   private async loadExam(allowAutoSubmit = true): Promise<void> {
-    const initial = await this.api.bootstrap();
+    const previousRound = this.bootstrapData?.currentRound;
+    const knownSession = this.session ?? (
+      previousRound ? this.storage.getSession(previousRound.roundId) : null
+    );
+    const initial = await this.api.bootstrap(knownSession?.participantId);
     const roundId = initial.currentRound?.roundId;
     this.session = roundId ? this.storage.getSession(roundId) : null;
-    this.bootstrapData = this.session
+    this.bootstrapData = this.session && this.session.participantId !== knownSession?.participantId
       ? await this.api.bootstrap(this.session.participantId)
       : initial;
+    if (shouldResetQuestionIndex(
+      previousRound?.roundId,
+      previousRound?.status,
+      this.bootstrapData.currentRound?.roundId,
+      this.bootstrapData.currentRound?.status,
+    )) {
+      this.currentQuestionIndex = 0;
+    }
     if (allowAutoSubmit) await this.handlePhaseSubmission();
+  }
+
+  private armSlowRequestTimer(): void {
+    this.clearSlowRequestTimer();
+    this.slowRequest = false;
+    this.slowRequestTimer = window.setTimeout(() => {
+      this.slowRequest = true;
+      this.render();
+    }, SLOW_REQUEST_MS);
+  }
+
+  private clearSlowRequestTimer(): void {
+    if (this.slowRequestTimer !== null) window.clearTimeout(this.slowRequestTimer);
+    this.slowRequestTimer = null;
+    this.slowRequest = false;
+  }
+
+  private armSlowBackgroundTimer(): void {
+    this.clearSlowBackgroundTimer();
+    this.slowBackgroundTimer = window.setTimeout(() => {
+      this.slowBackgroundRefresh = true;
+      this.updateConnectionFeedback();
+    }, SLOW_REQUEST_MS);
+  }
+
+  private clearSlowBackgroundTimer(): void {
+    if (this.slowBackgroundTimer !== null) window.clearTimeout(this.slowBackgroundTimer);
+    this.slowBackgroundTimer = null;
+    this.slowBackgroundRefresh = false;
+    this.updateConnectionFeedback();
+  }
+
+  private beginAction(action: PendingAction): boolean {
+    if (this.pendingAction) return false;
+    this.pendingAction = action;
+    this.armSlowRequestTimer();
+    this.render();
+    return true;
+  }
+
+  private finishAction(): void {
+    const completedAction = this.pendingAction;
+    this.pendingAction = null;
+    if (completedAction === "nickname") this.pendingNickname = "";
+    this.clearSlowRequestTimer();
+    this.render();
   }
 
   private async handlePhaseSubmission(): Promise<void> {
@@ -209,11 +281,37 @@ export class StudyApp {
       ${isExamActive ? "" : this.renderNavigation(route || "exam")}
       <main id="main" class="page ${isExamActive ? "page--quiz" : ""}" tabindex="-1">
         ${this.message ? `<div class="notice" role="status">${escapeHtml(this.message)}</div>` : ""}
+        ${this.renderRequestFeedback()}
         ${content}
       </main>
+      <div class="connection-feedback" role="status" aria-live="polite" hidden></div>
     `;
 
     this.syncIndeterminateCheckbox();
+    this.updateConnectionFeedback();
+  }
+
+  private renderRequestFeedback(): string {
+    if (!this.slowRequest) return "";
+    const copy = this.pendingAction === "transition"
+      ? "시험 단계를 바꾸는 데 시간이 조금 걸리고 있어요. 완료될 때까지 그대로 기다려주세요."
+      : this.pendingAction === "admin-login"
+        ? "관리자 권한을 확인하고 있어요. Apps Script 응답이 평소보다 조금 늦어요."
+        : this.pendingAction === "nickname"
+          ? "참가 정보를 저장하고 있어요. Apps Script 응답이 평소보다 조금 늦어요."
+          : this.pendingAction === "retry-submit"
+            ? "답안을 다시 보내고 있어요. 입력한 답은 이 기기에 안전하게 남아 있어요."
+            : "시험 데이터를 불러오는 데 시간이 조금 걸리고 있어요. 연결은 유지되고 있습니다.";
+    return `<div class="request-feedback" role="status"><span class="spinner" aria-hidden="true"></span><span>${copy}</span></div>`;
+  }
+
+  private updateConnectionFeedback(): void {
+    const feedback = this.root.querySelector<HTMLElement>(".connection-feedback");
+    if (!feedback) return;
+    feedback.hidden = !this.slowBackgroundRefresh;
+    feedback.textContent = this.slowBackgroundRefresh
+      ? "최신 시험 상태 확인이 늦어지고 있어요. 입력한 답은 이 기기에 계속 저장됩니다."
+      : "";
   }
 
   private renderNavigation(route: string): string {
@@ -272,6 +370,7 @@ export class StudyApp {
   }
 
   private renderNickname(round: RoundSummary): string {
+    const busy = this.pendingAction === "nickname";
     return `
       <section class="narrow-panel">
         <p class="eyebrow">${escapeHtml(round.title)}</p>
@@ -279,9 +378,9 @@ export class StudyApp {
         <p class="lead">시험 결과와 랭킹에 이 이름으로 표시돼요. 같은 이름도 괜찮아요.</p>
         <form class="stack" data-form="nickname">
           <label class="field-label" for="nickname">닉네임</label>
-          <input id="nickname" name="nickname" maxlength="20" autocomplete="nickname" required
-            value="${escapeHtml(this.session?.nickname ?? "")}" placeholder="닉네임을 입력해요" />
-          <button class="button button--primary" type="submit">시험 준비하기</button>
+          <input id="nickname" name="nickname" maxlength="20" autocomplete="nickname" required ${busy ? "disabled" : ""}
+            value="${escapeHtml(this.pendingNickname || this.session?.nickname || "")}" placeholder="닉네임을 입력해요" />
+          <button class="button button--primary" type="submit" ${busy ? "disabled" : ""}>${busy ? '<span class="spinner" aria-hidden="true"></span> 저장하고 있어요' : "시험 준비하기"}</button>
         </form>
       </section>
     `;
@@ -459,14 +558,15 @@ export class StudyApp {
   private renderAdmin(): string {
     const token = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (!token) {
+      const busy = this.pendingAction === "admin-login";
       return `
         <section class="narrow-panel">
           <p class="eyebrow">ADMIN</p><h1>시험 관리</h1>
           <p class="lead">관리자 코드를 입력해주세요.</p>
           <form class="stack" data-form="admin-login">
             <label class="field-label" for="admin-code">관리자 코드</label>
-            <input id="admin-code" name="code" type="password" autocomplete="current-password" required />
-            <button class="button button--primary" type="submit">관리 화면 열기</button>
+            <input id="admin-code" name="code" type="password" autocomplete="current-password" required ${busy ? "disabled" : ""} />
+            <button class="button button--primary" type="submit" ${busy ? "disabled" : ""}>${busy ? '<span class="spinner" aria-hidden="true"></span> 확인하고 있어요' : "관리 화면 열기"}</button>
           </form>
         </section>
       `;
@@ -474,6 +574,7 @@ export class StudyApp {
     const round = this.bootstrapData?.currentRound;
     if (!round) return this.renderEmpty("관리할 회차가 없어요", "시트에서 새 회차를 준비해주세요.");
     const target = nextStatus(round.status) as RoundStatus | null;
+    const transitionBusy = this.pendingAction === "transition";
     const actionLabel: Record<RoundStatus, string> = {
       WAITING: "1차 시험 시작",
       FIRST_TEST: "1차 시험 종료",
@@ -486,8 +587,8 @@ export class StudyApp {
         <p class="eyebrow">현재 회차</p>
         <h1>${escapeHtml(round.title)}</h1>
         <p class="lead">현재 ${phaseLabel(round.status)} 단계예요.</p>
-        ${target ? `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button">${actionLabel[round.status]}</button>` : '<p class="status-meta">이 회차의 시험이 모두 끝났어요.</p>'}
-        <button class="button button--text" data-action="admin-logout" type="button">관리 화면 닫기</button>
+        ${target ? `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button" ${transitionBusy ? "disabled" : ""}>${transitionBusy ? '<span class="spinner" aria-hidden="true"></span> 변경하고 있어요' : actionLabel[round.status]}</button>` : '<p class="status-meta">이 회차의 시험이 모두 끝났어요.</p>'}
+        <button class="button button--text" data-action="admin-logout" type="button" ${transitionBusy ? "disabled" : ""}>관리 화면 닫기</button>
         ${this.pendingTransition ? this.renderTransitionConfirm(round, this.pendingTransition) : ""}
       </section>
     `;
@@ -495,13 +596,14 @@ export class StudyApp {
 
   private renderTransitionConfirm(round: RoundSummary, target: RoundStatus): string {
     const ending = target === "REVIEW" || target === "FINISHED";
+    const busy = this.pendingAction === "transition";
     return `
       <div class="confirm-panel" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
         <h2 id="confirm-title">${ending ? `${phaseLabel(round.status)}을 끝낼까요?` : `${phaseLabel(target)}을 시작할까요?`}</h2>
         <p>${ending ? "모든 참가자의 현재 입력을 잠그고 답안을 제출해요." : "참가자 화면이 다음 단계로 바뀌어요."}</p>
         <div class="confirm-actions">
-          <button class="button button--secondary" data-action="cancel-transition" type="button">계속 진행해요</button>
-          <button class="button button--primary" data-action="confirm-transition" data-target="${target}" type="button">${ending ? "시험을 끝내요" : "시작해요"}</button>
+          <button class="button button--secondary" data-action="cancel-transition" type="button" ${busy ? "disabled" : ""}>계속 진행해요</button>
+          <button class="button button--primary" data-action="confirm-transition" data-target="${target}" type="button" ${busy ? "disabled" : ""}>${busy ? '<span class="spinner" aria-hidden="true"></span> 처리하고 있어요' : ending ? "시험을 끝내요" : "시작해요"}</button>
         </div>
       </div>
     `;
@@ -525,8 +627,12 @@ export class StudyApp {
       this.currentQuestionIndex += 1;
       this.renderAndFocusAnswer();
     } else if (action === "retry-submit") {
-      await this.handlePhaseSubmission();
-      this.render();
+      if (!this.beginAction("retry-submit")) return;
+      try {
+        await this.handlePhaseSubmission();
+      } finally {
+        this.finishAction();
+      }
     } else if (action === "prepare-transition") {
       this.pendingTransition = target.dataset.target as RoundStatus;
       this.render();
@@ -534,7 +640,12 @@ export class StudyApp {
       this.pendingTransition = null;
       this.render();
     } else if (action === "confirm-transition") {
-      await this.performTransition(target.dataset.target as RoundStatus);
+      if (!this.beginAction("transition")) return;
+      try {
+        await this.performTransition(target.dataset.target as RoundStatus);
+      } finally {
+        this.finishAction();
+      }
     } else if (action === "admin-logout") {
       sessionStorage.removeItem(ADMIN_TOKEN_KEY);
       this.pendingTransition = null;
@@ -550,21 +661,32 @@ export class StudyApp {
     if (form.dataset.form === "nickname") {
       const nickname = String(formData.get("nickname") ?? "").trim();
       if (!nickname || nickname.length > 20 || !this.bootstrapData?.currentRound) return;
-      this.session = this.session
-        ? this.storage.updateNickname(this.session, nickname)
-        : this.storage.createSession(this.bootstrapData.currentRound.roundId, nickname);
-      this.editingNickname = false;
-      await this.loadRoute(true);
+      this.pendingNickname = nickname;
+      if (!this.beginAction("nickname")) {
+        this.pendingNickname = "";
+        return;
+      }
+      try {
+        this.session = this.session
+          ? this.storage.updateNickname(this.session, nickname)
+          : this.storage.createSession(this.bootstrapData.currentRound.roundId, nickname);
+        this.editingNickname = false;
+        await this.loadRoute(true);
+      } finally {
+        this.finishAction();
+      }
     } else if (form.dataset.form === "admin-login") {
       const code = String(formData.get("code") ?? "");
+      if (!this.beginAction("admin-login")) return;
       try {
         const result = await this.api.adminLogin(code);
         sessionStorage.setItem(ADMIN_TOKEN_KEY, result.adminToken);
         this.message = "";
       } catch (error) {
         this.message = this.friendlyError(error, "관리자 코드를 확인해주세요.");
+      } finally {
+        this.finishAction();
       }
-      this.render();
     }
   }
 
@@ -598,7 +720,16 @@ export class StudyApp {
     const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (!round || !adminToken) return;
     try {
-      this.bootstrapData = await this.api.transition(round.roundId, targetStatus, adminToken);
+      const nextData = await this.api.transition(round.roundId, targetStatus, adminToken);
+      if (shouldResetQuestionIndex(
+        round.roundId,
+        round.status,
+        nextData.currentRound?.roundId,
+        nextData.currentRound?.status,
+      )) {
+        this.currentQuestionIndex = 0;
+      }
+      this.bootstrapData = nextData;
       this.pendingTransition = null;
       this.message = "";
     } catch (error) {
@@ -608,7 +739,6 @@ export class StudyApp {
       }
       this.message = this.friendlyError(error);
     }
-    this.render();
   }
 
   private renderAndFocusAnswer(): void {

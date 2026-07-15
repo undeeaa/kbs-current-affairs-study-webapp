@@ -1,4 +1,4 @@
-import type { PublicQuestion, RankingRow } from "./types";
+import type { PublicQuestion, RankingRow, RoundStatus } from "./types";
 
 export function normalizeAnswer(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
@@ -74,6 +74,17 @@ export function orderRetestQuestions(
   }
   const shuffled = stableShuffle(questions, participantId);
   return { questions: shuffled, order: shuffled.map((question) => question.questionId) };
+}
+
+export function shouldResetQuestionIndex(
+  previousRoundId: string | undefined,
+  previousStatus: RoundStatus | undefined,
+  nextRoundId: string | undefined,
+  nextStatus: RoundStatus | undefined,
+): boolean {
+  if (!nextRoundId || !nextStatus) return false;
+  if (previousRoundId !== nextRoundId) return true;
+  return previousStatus !== nextStatus && (nextStatus === "FIRST_TEST" || nextStatus === "RETEST");
 }
 
 export function nextStatus(status: string): string | null {

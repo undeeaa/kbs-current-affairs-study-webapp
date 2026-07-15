@@ -5,6 +5,7 @@ import {
   nextStatus,
   normalizeAnswer,
   orderRetestQuestions,
+  shouldResetQuestionIndex,
   stableShuffle,
 } from "../src/domain";
 import type { PublicQuestion } from "../src/types";
@@ -66,5 +67,12 @@ describe("시험 상태", () => {
     expect(nextStatus("WAITING")).toBe("FIRST_TEST");
     expect(nextStatus("RETEST")).toBe("FINISHED");
     expect(nextStatus("FINISHED")).toBeNull();
+  });
+
+  it("새 시험과 재시험 시작 시 현재 문제 위치를 첫 문제로 초기화한다", () => {
+    expect(shouldResetQuestionIndex("round-1", "REVIEW", "round-1", "RETEST")).toBe(true);
+    expect(shouldResetQuestionIndex("round-1", "WAITING", "round-1", "FIRST_TEST")).toBe(true);
+    expect(shouldResetQuestionIndex("round-1", "RETEST", "round-1", "RETEST")).toBe(false);
+    expect(shouldResetQuestionIndex("round-1", "FINISHED", "round-2", "WAITING")).toBe(true);
   });
 });
