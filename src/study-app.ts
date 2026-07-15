@@ -104,6 +104,7 @@ export class StudyApp {
       }
       return;
     }
+    const backgroundSnapshot = background ? this.getBackgroundRenderSnapshot() : "";
     this.refreshing = true;
     if (!background) {
       this.loading = true;
@@ -141,8 +142,21 @@ export class StudyApp {
         await this.loadRoute();
         return;
       }
-      this.render();
+      if (!background || backgroundSnapshot !== this.getBackgroundRenderSnapshot()) {
+        this.render();
+      }
     }
+  }
+
+  private getBackgroundRenderSnapshot(): string {
+    return JSON.stringify({
+      bootstrapData: this.bootstrapData,
+      historyData: this.historyData,
+      detailData: this.detailData,
+      session: this.session,
+      message: this.message,
+      submittingAttempt: this.submittingAttempt,
+    });
   }
 
   private async loadExam(allowAutoSubmit = true): Promise<void> {
