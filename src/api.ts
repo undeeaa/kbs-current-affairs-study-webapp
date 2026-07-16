@@ -5,6 +5,7 @@ import type {
   BootstrapData,
   RoundDetail,
   RoundStatus,
+  RoundStatusSnapshot,
   RoundSummary,
   SubmitAttemptInput,
 } from "./types";
@@ -45,13 +46,13 @@ export class StudyApi {
     return envelope.data;
   }
 
-  private async get<T>(action: string, params: Record<string, string> = {}): Promise<T> {
+  private async get<T>(action: string, params: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
     this.ensureConfigured();
     const url = new URL(this.baseUrl);
     url.searchParams.set("action", action);
     url.searchParams.set("ts", String(Date.now()));
     Object.entries(params).forEach(([key, value]) => value && url.searchParams.set(key, value));
-    const response = await fetch(url, { cache: "no-store", redirect: "follow" });
+    const response = await fetch(url, { cache: "no-store", redirect: "follow", signal });
     return this.parse<T>(response);
   }
 
@@ -66,16 +67,20 @@ export class StudyApi {
     return this.parse<T>(response);
   }
 
-  bootstrap(participantId = ""): Promise<BootstrapData> {
-    return this.get("bootstrap", { participantId });
+  status(signal?: AbortSignal): Promise<RoundStatusSnapshot> {
+    return this.get("status", {}, signal);
   }
 
-  history(): Promise<RoundSummary[]> {
-    return this.get("history");
+  bootstrap(participantId = "", signal?: AbortSignal): Promise<BootstrapData> {
+    return this.get("bootstrap", { participantId }, signal);
   }
 
-  roundDetail(roundId: string): Promise<RoundDetail> {
-    return this.get("roundDetail", { roundId });
+  history(signal?: AbortSignal): Promise<RoundSummary[]> {
+    return this.get("history", {}, signal);
+  }
+
+  roundDetail(roundId: string, signal?: AbortSignal): Promise<RoundDetail> {
+    return this.get("roundDetail", { roundId }, signal);
   }
 
   attemptResult(roundId: string, participantId: string, attempt: Attempt): Promise<AttemptResult> {

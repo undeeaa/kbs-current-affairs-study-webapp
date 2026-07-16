@@ -85,6 +85,7 @@ const server = http.createServer((request, response) => {
   if (request.method === "GET") {
     const action = url.searchParams.get("action");
     if (action === "health") return json(response, { service: "mock", status: "ok" });
+    if (action === "status") return json(response, { roundId, status });
     if (action === "bootstrap") return json(response, bootstrap(url.searchParams.get("participantId") || ""));
     if (action === "history") return json(response, status === "FINISHED" ? [round()] : []);
     if (action === "roundDetail") {

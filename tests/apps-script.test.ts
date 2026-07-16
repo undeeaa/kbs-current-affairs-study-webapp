@@ -15,6 +15,8 @@ interface GasContext {
   ): Array<Record<string, unknown>>;
   KBS_ranking(roundId: string, total: number): Array<{ rank: number; nickname: string; score: number }>;
   KBS_responses(): { rows: Array<Record<string, unknown>> };
+  KBS_currentRound(): Record<string, unknown> | null;
+  KBS_status(): { roundId: string | null; status: string | null };
 }
 
 describe("Apps Script 핵심 규칙", () => {
@@ -76,5 +78,12 @@ describe("Apps Script 핵심 규칙", () => {
       { id: "next-2", question: "다음 문제 2", answer: "정답" },
     ], [{ roundId: "round-1", questionId: "used", order: 1 }]);
     expect(candidates.map((row) => row.id)).toEqual(["next-1", "next-2"]);
+  });
+
+  it("상태 조회에는 회차 ID와 단계만 포함한다", () => {
+    gas.KBS_currentRound = () => ({ roundId: "round-1", status: "FIRST_TEST", title: "시험" });
+    expect(gas.KBS_status()).toEqual({ roundId: "round-1", status: "FIRST_TEST" });
+    gas.KBS_currentRound = () => null;
+    expect(gas.KBS_status()).toEqual({ roundId: null, status: null });
   });
 });

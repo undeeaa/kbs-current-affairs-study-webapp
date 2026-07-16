@@ -31,6 +31,19 @@ describe("API 계약", () => {
     } satisfies Partial<StudyApiError>);
   });
 
+  it("가벼운 시험 상태만 별도 요청한다", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        data: { roundId: "round-1", status: "FIRST_TEST" },
+        serverTime: "now",
+      })),
+    );
+    const api = new StudyApi("https://script.google.com/macros/s/example/exec");
+    await expect(api.status()).resolves.toEqual({ roundId: "round-1", status: "FIRST_TEST" });
+    expect(String(fetchMock.mock.calls[0][0])).toContain("action=status");
+  });
+
   it("다음 회차 제목과 관리자 토큰을 생성 요청으로 보낸다", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({

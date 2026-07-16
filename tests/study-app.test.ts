@@ -5,7 +5,7 @@ function envelope(data: unknown): Response {
   return new Response(JSON.stringify({ ok: true, data, serverTime: "now" }));
 }
 
-describe("느린 Apps Script 응답 UI", () => {
+describe("요청 중 UI", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
@@ -43,10 +43,10 @@ describe("느린 Apps Script 응답 UI", () => {
     await start;
   });
 
-  it("관리자 로그인 중 입력 필드와 버튼을 잠그고 지연 안내를 표시한다", async () => {
+  it("관리자 로그인 중 입력 필드와 버튼만 잠그고 내부 연결 안내는 표시하지 않는다", async () => {
     vi.useFakeTimers();
     vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");
-    window.location.hash = "#/admin";
+    window.history.replaceState(null, "", "#/admin");
     document.body.innerHTML = '<div id="app"></div>';
 
     let resolveLogin: ((response: Response) => void) | undefined;
@@ -79,7 +79,8 @@ describe("느린 Apps Script 응답 UI", () => {
     expect(root.textContent).toContain("확인하고 있어요");
 
     await vi.advanceTimersByTimeAsync(1_200);
-    expect(root.textContent).toContain("Apps Script 응답이 평소보다 조금 늦어요");
+    expect(root.textContent).not.toContain("Apps Script");
+    expect(root.textContent).not.toContain("Google");
 
     resolveLogin?.(envelope({ adminToken: "token", expiresAt: "later" }));
     await Promise.resolve();

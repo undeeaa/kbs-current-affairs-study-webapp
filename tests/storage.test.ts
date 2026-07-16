@@ -14,7 +14,15 @@ describe("브라우저 임시 저장", () => {
     const created = storage.createSession("2026-01", "민지");
     expect(created.participantId).toBe("11111111-1111-4111-8111-111111111111");
     expect(storage.getSession("2026-01")).toEqual(created);
+    expect(storage.getActiveSession()).toEqual(created);
     expect(storage.getSession("2026-02")).toBeNull();
+  });
+
+  it("기존 세션 키도 최근 참가자 포인터로 한 번만 마이그레이션한다", () => {
+    const legacy = { roundId: "2026-01", participantId: "p-12345678", nickname: "민지" };
+    localStorage.setItem("kbs-study:v1:session:2026-01", JSON.stringify(legacy));
+    expect(storage.getActiveSession()).toEqual(legacy);
+    expect(JSON.parse(String(localStorage.getItem("kbs-study:v1:active-session")))).toEqual(legacy);
   });
 
   it("차수별 답안과 제출 상태를 분리한다", () => {

@@ -28,7 +28,7 @@ function bootstrap(status: RoundStatus, title = "7월 시험"): BootstrapData {
   };
 }
 
-describe("낙관적 UI 업데이트", () => {
+describe("서버 확정형 UI", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
@@ -37,15 +37,11 @@ describe("낙관적 UI 업데이트", () => {
     sessionStorage.clear();
   });
 
-  it("닉네임을 입력하면 Google 응답 전에 대기 화면을 표시한다", async () => {
+  it("닉네임은 로컬에 즉시 반영하고 추가 bootstrap을 호출하지 않는다", async () => {
     vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");
     window.history.replaceState(null, "", "#/exam");
     document.body.innerHTML = '<div id="app"></div>';
-
-    let resolveRefresh: ((response: Response) => void) | undefined;
-    vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(envelope(bootstrap("WAITING")))
-      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveRefresh = resolve; }));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(envelope(bootstrap("WAITING")));
 
     const root = document.querySelector<HTMLDivElement>("#app") as HTMLDivElement;
     const app = new StudyApp(root);
@@ -58,13 +54,11 @@ describe("낙관적 UI 업데이트", () => {
 
     expect(root.textContent).toContain("곧 시험이 시작돼요");
     expect(root.textContent).toContain("민지 · 시험 시작을 기다리고 있어요");
-    expect(root.textContent).toContain("참가 준비는 끝났어요");
-
-    resolveRefresh?.(envelope(bootstrap("WAITING")));
-    await vi.waitFor(() => expect(root.textContent).not.toContain("참가 준비는 끝났어요"));
+    expect(root.textContent).not.toContain("Google");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("시험 단계는 화면에 먼저 반영하고 서버 실패 시 이전 상태로 복구한다", async () => {
+  it("시험 단계는 서버 응답 전까지 기존 상태를 유지한다", async () => {
     vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");
     window.history.replaceState(null, "", "#/admin");
     sessionStorage.setItem("kbs-study:admin-token", "token");
@@ -78,19 +72,19 @@ describe("낙관적 UI 업데이트", () => {
     const root = document.querySelector<HTMLDivElement>("#app") as HTMLDivElement;
     const app = new StudyApp(root);
     await app.start();
-
     root.querySelector<HTMLButtonElement>('[data-action="prepare-transition"]')?.click();
     root.querySelector<HTMLButtonElement>('[data-action="confirm-transition"]')?.click();
 
-    expect(root.textContent).toContain("현재 1차 시험 단계예요");
-    expect(root.textContent).toContain("화면을 다음 시험 단계로 먼저 바꿨어요");
+    expect(root.textContent).toContain("현재 시험 준비 단계예요");
+    expect(root.textContent).toContain("처리하고 있어요");
+    expect(root.textContent).not.toContain("Google");
 
     resolveTransition?.(errorEnvelope("단계를 저장하지 못했어요."));
-    await vi.waitFor(() => expect(root.textContent).toContain("현재 시험 준비 단계예요"));
-    expect(root.textContent).toContain("단계를 저장하지 못했어요.");
+    await vi.waitFor(() => expect(root.textContent).toContain("단계를 저장하지 못했어요."));
+    expect(root.textContent).toContain("현재 시험 준비 단계예요");
   });
 
-  it("다음 회차를 먼저 표시하고 서버 실패 시 완료된 회차로 돌아간다", async () => {
+  it("다음 회차도 서버 응답 전까지 기존 회차와 입력값을 유지한다", async () => {
     vi.stubEnv("VITE_API_URL", "https://script.google.com/macros/s/example/exec");
     window.history.replaceState(null, "", "#/admin");
     sessionStorage.setItem("kbs-study:admin-token", "token");
@@ -104,18 +98,17 @@ describe("낙관적 UI 업데이트", () => {
     const root = document.querySelector<HTMLDivElement>("#app") as HTMLDivElement;
     const app = new StudyApp(root);
     await app.start();
-
     const input = root.querySelector<HTMLInputElement>("#next-round-title") as HTMLInputElement;
     input.value = "새 회차";
     root.querySelector<HTMLFormElement>('[data-form="next-round"]')
       ?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
 
-    expect(root.textContent).toContain("새 회차");
-    expect(root.textContent).toContain("현재 시험 준비 단계예요");
-    expect(root.textContent).toContain("새 회차를 화면에 먼저 준비했어요");
+    expect(root.textContent).toContain("이전 회차");
+    expect(root.querySelector<HTMLInputElement>("#next-round-title")?.value).toBe("새 회차");
+    expect(root.querySelector<HTMLInputElement>("#next-round-title")?.disabled).toBe(true);
 
     resolveNextRound?.(errorEnvelope("새 회차를 만들지 못했어요."));
-    await vi.waitFor(() => expect(root.textContent).toContain("이전 회차"));
-    expect(root.textContent).toContain("새 회차를 만들지 못했어요.");
+    await vi.waitFor(() => expect(root.textContent).toContain("새 회차를 만들지 못했어요."));
+    expect(root.querySelector<HTMLInputElement>("#next-round-title")?.value).toBe("새 회차");
   });
 });

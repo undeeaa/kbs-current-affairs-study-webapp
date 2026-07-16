@@ -37,6 +37,12 @@ VITE_API_URL=http://127.0.0.1:8787 npm run dev
 
 로컬 관리자 코드는 `study1234`입니다. 운영 코드와는 관계없는 개발 전용 값입니다.
 
+운영 Apps Script의 읽기 응답 시간을 확인할 때는 쓰기 없이 다음 명령을 사용합니다.
+
+```sh
+VITE_API_URL=<Apps Script /exec URL> npm run measure:api
+```
+
 ## 배포와 운영
 
 Apps Script 설치, Script Properties, GitHub Pages 연결, 회차 생성 및 장애 복구 절차는 [운영 가이드](docs/OPERATIONS.md)를 따릅니다.

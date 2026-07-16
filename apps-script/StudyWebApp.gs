@@ -35,6 +35,8 @@ function KBS_handleGet(e) {
     var data;
     if (action === "health") {
       data = { service: "kbs-current-affairs-study", status: "ok" };
+    } else if (action === "status") {
+      data = KBS_status();
     } else if (action === "bootstrap") {
       data = KBS_bootstrap(KBS_string(e.parameter.participantId));
     } else if (action === "history") {
@@ -282,6 +284,15 @@ function KBS_publicQuestions(bundle) {
   return bundle.questions.map(function (question) {
     return { questionId: question.questionId, order: question.order, question: question.question };
   });
+}
+
+function KBS_status() {
+  var round = KBS_currentRound();
+  if (!round) return { roundId: null, status: null };
+  return {
+    roundId: KBS_string(round.roundId),
+    status: KBS_string(round.status),
+  };
 }
 
 function KBS_bootstrap(participantId) {

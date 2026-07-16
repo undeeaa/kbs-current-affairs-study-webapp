@@ -9,14 +9,22 @@ import type {
   PublicQuestion,
   RoundDetail,
   RoundStatus,
+  RoundStatusSnapshot,
   RoundSummary,
 } from "./types";
 
-const POLL_INTERVAL_MS = 4_000;
-const SLOW_REQUEST_MS = 1_200;
 const ADMIN_TOKEN_KEY = "kbs-study:admin-token";
+const HISTORY_CACHE_MS = 60_000;
+const POLL_DELAYS: Record<RoundStatus, number> = {
+  WAITING: 3_000,
+  FIRST_TEST: 5_000,
+  REVIEW: 3_000,
+  RETEST: 5_000,
+  FINISHED: 20_000,
+};
+const POLL_FAILURE_DELAYS = [5_000, 10_000, 20_000, 30_000];
 
-type PendingAction = "nickname" | "admin-login" | "transition" | "retry-submit" | "next-round";
+type PendingAction = "admin-login" | "transition" | "retry-submit" | "next-round";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -57,10 +65,11 @@ export class StudyApp {
   private readonly storage = new StudyStorage();
   private bootstrapData: BootstrapData | null = null;
   private historyData: RoundSummary[] = [];
+  private historyFetchedAt = 0;
   private detailData: RoundDetail | null = null;
+  private readonly detailCache = new Map<string, { data: RoundDetail; fetchedAt: number }>();
   private session: ParticipantSession | null = null;
   private loading = true;
-  private refreshing = false;
   private message = "";
   private currentQuestionIndex = 0;
   private editingNickname = false;
@@ -71,21 +80,22 @@ export class StudyApp {
   private openExplanations = new Set<string>();
   private pendingTransition: RoundStatus | null = null;
   private pendingAction: PendingAction | null = null;
-  private pendingNickname = "";
   private pendingRoundTitle = "";
-  private slowRequest = false;
-  private slowBackgroundRefresh = false;
-  private slowRequestTimer: number | null = null;
-  private slowBackgroundTimer: number | null = null;
-  private queuedForegroundLoad = false;
+  private routeRequestId = 0;
+  private routeAbortController: AbortController | null = null;
+  private statusCheckInFlight = false;
+  private statusSupported = true;
+  private pollFailureIndex = 0;
 
   constructor(private readonly root: HTMLDivElement) {}
 
   async start(): Promise<void> {
     window.addEventListener("hashchange", () => void this.loadRoute());
-    window.addEventListener("online", () => void this.loadRoute(true));
+    window.addEventListener("online", () => this.scheduleStatusPoll(true));
+    window.addEventListener("offline", () => this.clearPolling());
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") void this.loadRoute(true);
+      if (document.visibilityState === "visible") this.scheduleStatusPoll(true);
+      else this.clearPolling();
     });
     this.root.addEventListener("click", (event) => void this.handleClick(event));
     this.root.addEventListener("submit", (event) => void this.handleSubmit(event));
@@ -94,61 +104,60 @@ export class StudyApp {
     await this.loadRoute();
   }
 
-  private async loadRoute(background = false): Promise<void> {
-    if (this.refreshing) {
-      if (!background) {
-        this.queuedForegroundLoad = true;
-        this.loading = true;
-        this.armSlowRequestTimer();
-        this.render();
-      }
-      return;
-    }
-    const backgroundSnapshot = background ? this.getBackgroundRenderSnapshot() : "";
-    this.refreshing = true;
-    if (!background) {
-      this.loading = true;
-      this.armSlowRequestTimer();
-      this.render();
-    } else if (!this.pendingAction) {
-      this.armSlowBackgroundTimer();
-    }
+  private async loadRoute(): Promise<void> {
+    const requestId = ++this.routeRequestId;
+    this.routeAbortController?.abort();
+    const controller = new AbortController();
+    this.routeAbortController = controller;
     this.clearPolling();
+    const [route, id] = routeParts();
+    let useCachedContent = false;
+    let skipFetch = false;
+    if (route === "history" && id) {
+      const cached = this.detailCache.get(id);
+      if (cached) {
+        this.detailData = cached.data;
+        useCachedContent = true;
+        skipFetch = Date.now() - cached.fetchedAt < HISTORY_CACHE_MS;
+      }
+    } else if (route === "history" && this.historyFetchedAt) {
+      useCachedContent = true;
+      skipFetch = Date.now() - this.historyFetchedAt < HISTORY_CACHE_MS;
+    }
+    this.loading = !useCachedContent;
+    this.message = "";
+    this.render();
+    if (skipFetch) return;
     try {
-      const [route, id] = routeParts();
       if (!route || route === "exam") {
-        await this.loadExam();
-        this.startPolling();
+        await this.loadExam(true, controller.signal);
       } else if (route === "history" && id) {
-        this.detailData = await this.api.roundDetail(id);
+        this.detailData = await this.api.roundDetail(id, controller.signal);
+        this.detailCache.set(id, { data: this.detailData, fetchedAt: Date.now() });
+        if (this.detailCache.size > 3) {
+          const oldestKey = this.detailCache.keys().next().value as string | undefined;
+          if (oldestKey) this.detailCache.delete(oldestKey);
+        }
       } else if (route === "history") {
-        this.historyData = await this.api.history();
+        this.historyData = await this.api.history(controller.signal);
+        this.historyFetchedAt = Date.now();
       } else if (route === "admin") {
-        await this.loadExam(false);
-        this.startPolling();
+        await this.loadExam(false, controller.signal);
       } else {
         window.location.hash = "#/exam";
       }
-      if (background) this.message = "";
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       this.message = this.friendlyError(error);
     } finally {
+      if (requestId !== this.routeRequestId) return;
       this.loading = false;
-      this.refreshing = false;
-      if (!background) this.clearSlowRequestTimer();
-      this.clearSlowBackgroundTimer();
-      if (this.queuedForegroundLoad) {
-        this.queuedForegroundLoad = false;
-        await this.loadRoute();
-        return;
-      }
-      if (!background || backgroundSnapshot !== this.getBackgroundRenderSnapshot()) {
-        this.render();
-      }
+      this.render();
+      if (!route || route === "exam") this.scheduleStatusPoll();
     }
   }
 
-  private getBackgroundRenderSnapshot(): string {
+  private getRemoteRenderSnapshot(): string {
     return JSON.stringify({
       bootstrapData: this.bootstrapData,
       historyData: this.historyData,
@@ -159,16 +168,15 @@ export class StudyApp {
     });
   }
 
-  private async loadExam(allowAutoSubmit = true): Promise<void> {
+  private async loadExam(allowAutoSubmit = true, signal?: AbortSignal): Promise<void> {
     const previousRound = this.bootstrapData?.currentRound;
-    const knownSession = this.session ?? (
-      previousRound ? this.storage.getSession(previousRound.roundId) : null
-    );
-    const initial = await this.api.bootstrap(knownSession?.participantId);
+    const knownSession = this.session ?? this.storage.getActiveSession();
+    const initial = await this.api.bootstrap(knownSession?.participantId, signal);
     const roundId = initial.currentRound?.roundId;
     this.session = roundId ? this.storage.getSession(roundId) : null;
+    if (this.session) this.storage.rememberSession(this.session);
     this.bootstrapData = this.session && this.session.participantId !== knownSession?.participantId
-      ? await this.api.bootstrap(this.session.participantId)
+      ? await this.api.bootstrap(this.session.participantId, signal)
       : initial;
     if (shouldResetQuestionIndex(
       previousRound?.roundId,
@@ -181,54 +189,19 @@ export class StudyApp {
     if (allowAutoSubmit) await this.handlePhaseSubmission();
   }
 
-  private armSlowRequestTimer(): void {
-    this.clearSlowRequestTimer();
-    this.slowRequest = false;
-    this.slowRequestTimer = window.setTimeout(() => {
-      this.slowRequest = true;
-      this.render();
-    }, SLOW_REQUEST_MS);
-  }
-
-  private clearSlowRequestTimer(): void {
-    if (this.slowRequestTimer !== null) window.clearTimeout(this.slowRequestTimer);
-    this.slowRequestTimer = null;
-    this.slowRequest = false;
-  }
-
-  private armSlowBackgroundTimer(): void {
-    this.clearSlowBackgroundTimer();
-    this.slowBackgroundTimer = window.setTimeout(() => {
-      this.slowBackgroundRefresh = true;
-      this.updateConnectionFeedback();
-    }, SLOW_REQUEST_MS);
-  }
-
-  private clearSlowBackgroundTimer(): void {
-    if (this.slowBackgroundTimer !== null) window.clearTimeout(this.slowBackgroundTimer);
-    this.slowBackgroundTimer = null;
-    this.slowBackgroundRefresh = false;
-    this.updateConnectionFeedback();
-  }
-
   private beginAction(action: PendingAction): boolean {
     if (this.pendingAction) return false;
     this.pendingAction = action;
     this.clearPolling();
-    this.armSlowRequestTimer();
     this.render();
     return true;
   }
 
   private finishAction(): void {
-    const completedAction = this.pendingAction;
     this.pendingAction = null;
-    if (completedAction === "nickname") this.pendingNickname = "";
-    if (completedAction === "next-round") this.pendingRoundTitle = "";
-    this.clearSlowRequestTimer();
     this.render();
     const [route] = routeParts();
-    if (!route || route === "exam" || route === "admin") this.startPolling();
+    if (!route || route === "exam") this.scheduleStatusPoll();
   }
 
   private async handlePhaseSubmission(): Promise<void> {
@@ -254,7 +227,7 @@ export class StudyApp {
     this.render();
     try {
       const answers = this.storage.getAnswers(roundId, this.session.participantId, attempt);
-      await this.api.submitAttempt({
+      const result = await this.api.submitAttempt({
         roundId,
         participantId: this.session.participantId,
         nickname: this.session.nickname,
@@ -264,7 +237,11 @@ export class StudyApp {
       this.storage.setSubmissionState(roundId, this.session.participantId, attempt, "submitted");
       this.retryDelayIndex = 0;
       this.message = "";
-      this.bootstrapData = await this.api.bootstrap(this.session.participantId);
+      this.bootstrapData = {
+        ...this.bootstrapData,
+        eligibleForRetest: attempt === 1 || this.bootstrapData.eligibleForRetest,
+        ...(attempt === 1 ? { firstResult: result } : { retestResult: result }),
+      };
     } catch (error) {
       this.message = this.friendlyError(error, "답안을 아직 보내지 못했어요. 연결되는 대로 다시 제출할게요.");
       this.scheduleRetry();
@@ -278,17 +255,92 @@ export class StudyApp {
     const delays = [5_000, 10_000, 20_000, 30_000];
     const delay = delays[Math.min(this.retryDelayIndex, delays.length - 1)];
     this.retryDelayIndex += 1;
-    this.retryTimer = window.setTimeout(() => void this.loadRoute(true), delay);
+    this.retryTimer = window.setTimeout(() => void this.refreshExamSilently(), delay);
   }
 
-  private startPolling(): void {
+  private canPollStatus(): boolean {
+    const [route] = routeParts();
+    return (!route || route === "exam") &&
+      document.visibilityState === "visible" &&
+      navigator.onLine &&
+      !this.pendingAction;
+  }
+
+  private scheduleStatusPoll(immediate = false): void {
     this.clearPolling();
-    this.pollTimer = window.setInterval(() => void this.loadRoute(true), POLL_INTERVAL_MS);
+    if (!this.canPollStatus()) return;
+    const status = this.bootstrapData?.currentRound?.status;
+    const baseDelay = immediate
+      ? 0
+      : this.pollFailureIndex > 0
+        ? POLL_FAILURE_DELAYS[Math.min(this.pollFailureIndex - 1, POLL_FAILURE_DELAYS.length - 1)]
+        : status ? POLL_DELAYS[status] : 20_000;
+    const delay = immediate ? 0 : Math.round(baseDelay * (0.9 + Math.random() * 0.2));
+    this.pollTimer = window.setTimeout(() => void this.pollStatus(), delay);
   }
 
   private clearPolling(): void {
-    if (this.pollTimer !== null) window.clearInterval(this.pollTimer);
+    if (this.pollTimer !== null) window.clearTimeout(this.pollTimer);
     this.pollTimer = null;
+  }
+
+  private async pollStatus(): Promise<void> {
+    if (!this.canPollStatus() || this.statusCheckInFlight) return;
+    this.statusCheckInFlight = true;
+    try {
+      if (!this.statusSupported) {
+        await this.refreshExamSilently();
+      } else {
+        const snapshot = await this.api.status();
+        this.pollFailureIndex = 0;
+        await this.handleStatusSnapshot(snapshot);
+      }
+    } catch (error) {
+      if (error instanceof StudyApiError && error.code === "UNKNOWN_ACTION") {
+        this.statusSupported = false;
+        try {
+          await this.refreshExamSilently();
+          this.pollFailureIndex = 0;
+        } catch {
+          this.pollFailureIndex += 1;
+        }
+      } else {
+        this.pollFailureIndex += 1;
+      }
+    } finally {
+      this.statusCheckInFlight = false;
+      this.scheduleStatusPoll();
+    }
+  }
+
+  private async handleStatusSnapshot(snapshot: RoundStatusSnapshot): Promise<void> {
+    const data = this.bootstrapData;
+    const current = data?.currentRound;
+    if ((current?.roundId ?? null) === snapshot.roundId && (current?.status ?? null) === snapshot.status) return;
+    const endingAttempt = current?.roundId === snapshot.roundId && this.session
+      ? current.status === "FIRST_TEST" && snapshot.status === "REVIEW"
+        ? 1
+        : current.status === "RETEST" && snapshot.status === "FINISHED"
+          ? 2
+          : null
+      : null;
+    if (endingAttempt && data && current && snapshot.status) {
+      this.bootstrapData = {
+        ...data,
+        currentRound: { ...current, status: snapshot.status },
+      };
+      await this.ensureSubmitted(endingAttempt);
+      this.render();
+      return;
+    }
+    await this.refreshExamSilently();
+  }
+
+  private async refreshExamSilently(): Promise<void> {
+    const before = this.getRemoteRenderSnapshot();
+    await this.loadExam();
+    this.pollFailureIndex = 0;
+    if (before !== this.getRemoteRenderSnapshot()) this.render();
   }
 
   private friendlyError(error: unknown, fallback = "연결이 잠시 불안정해요. 잠시 후 다시 시도해볼게요."): string {
@@ -315,43 +367,11 @@ export class StudyApp {
       ${isExamActive ? "" : this.renderNavigation(route || "exam")}
       <main id="main" class="page ${isExamActive ? "page--quiz" : ""}" tabindex="-1">
         ${this.message ? `<div class="notice" role="status">${escapeHtml(this.message)}</div>` : ""}
-        ${this.renderRequestFeedback()}
         ${content}
       </main>
-      <div class="connection-feedback" role="status" aria-live="polite" hidden></div>
     `;
 
     this.syncIndeterminateCheckbox();
-    this.updateConnectionFeedback();
-  }
-
-  private renderRequestFeedback(): string {
-    const optimisticCopy = this.pendingAction === "nickname"
-      ? "참가 준비는 끝났어요. 최신 시험 상태를 확인하고 있어요."
-      : this.pendingAction === "transition"
-        ? "화면을 다음 시험 단계로 먼저 바꿨어요. Google에 저장하고 있어요."
-        : this.pendingAction === "next-round"
-          ? "새 회차를 화면에 먼저 준비했어요. Google에 저장하고 있어요."
-          : "";
-    if (optimisticCopy) {
-      return `<div class="request-feedback" role="status"><span class="spinner" aria-hidden="true"></span><span>${optimisticCopy}</span></div>`;
-    }
-    if (!this.slowRequest || (this.loading && !this.pendingAction)) return "";
-    const copy = this.pendingAction === "admin-login"
-        ? "관리자 권한을 확인하고 있어요. Apps Script 응답이 평소보다 조금 늦어요."
-        : this.pendingAction === "retry-submit"
-          ? "답안을 다시 보내고 있어요. 입력한 답은 이 기기에 안전하게 남아 있어요."
-          : "시험 데이터를 불러오는 데 시간이 조금 걸리고 있어요. 연결은 유지되고 있습니다.";
-    return `<div class="request-feedback" role="status"><span class="spinner" aria-hidden="true"></span><span>${copy}</span></div>`;
-  }
-
-  private updateConnectionFeedback(): void {
-    const feedback = this.root.querySelector<HTMLElement>(".connection-feedback");
-    if (!feedback) return;
-    feedback.hidden = !this.slowBackgroundRefresh;
-    feedback.textContent = this.slowBackgroundRefresh
-      ? "최신 시험 상태 확인이 늦어지고 있어요. 입력한 답은 이 기기에 계속 저장됩니다."
-      : "";
   }
 
   private renderNavigation(route: string): string {
@@ -409,7 +429,6 @@ export class StudyApp {
   }
 
   private renderNickname(round: RoundSummary): string {
-    const busy = this.pendingAction === "nickname";
     return `
       <section class="narrow-panel">
         <p class="eyebrow">${escapeHtml(round.title)}</p>
@@ -417,9 +436,9 @@ export class StudyApp {
         <p class="lead">시험 결과와 랭킹에 이 이름으로 표시돼요. 같은 이름도 괜찮아요.</p>
         <form class="stack" data-form="nickname">
           <label class="field-label" for="nickname">닉네임</label>
-          <input id="nickname" name="nickname" maxlength="20" autocomplete="nickname" required ${busy ? "disabled" : ""}
-            value="${escapeHtml(this.pendingNickname || this.session?.nickname || "")}" placeholder="닉네임을 입력해요" />
-          <button class="button button--primary" type="submit" ${busy ? "disabled" : ""}>${busy ? '<span class="spinner" aria-hidden="true"></span> 저장하고 있어요' : "시험 준비하기"}</button>
+          <input id="nickname" name="nickname" maxlength="20" autocomplete="nickname" required
+            value="${escapeHtml(this.session?.nickname || "")}" placeholder="닉네임을 입력해요" />
+          <button class="button button--primary" type="submit">시험 준비하기</button>
         </form>
       </section>
     `;
@@ -626,7 +645,7 @@ export class StudyApp {
         <p class="eyebrow">현재 회차</p>
         <h1>${escapeHtml(round.title)}</h1>
         <p class="lead">현재 ${phaseLabel(round.status)} 단계예요.</p>
-        ${adminBusy ? "" : target ? `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button">${actionLabel[round.status]}</button>` : this.renderNextRoundForm()}
+        ${target ? adminBusy ? "" : `<button class="button button--primary" data-action="prepare-transition" data-target="${target}" type="button">${actionLabel[round.status]}</button>` : this.renderNextRoundForm()}
         <button class="button button--text" data-action="admin-logout" type="button" ${adminBusy ? "disabled" : ""}>관리 화면 닫기</button>
         ${this.pendingTransition ? this.renderTransitionConfirm(round, this.pendingTransition) : ""}
       </section>
@@ -717,22 +736,13 @@ export class StudyApp {
     if (form.dataset.form === "nickname") {
       const nickname = String(formData.get("nickname") ?? "").trim();
       if (!nickname || nickname.length > 20 || !this.bootstrapData?.currentRound) return;
-      this.pendingNickname = nickname;
-      if (!this.beginAction("nickname")) {
-        this.pendingNickname = "";
-        return;
-      }
-      try {
-        this.session = this.session
-          ? this.storage.updateNickname(this.session, nickname)
-          : this.storage.createSession(this.bootstrapData.currentRound.roundId, nickname);
-        this.editingNickname = false;
-        this.message = "";
-        this.render();
-        await this.loadRoute(true);
-      } finally {
-        this.finishAction();
-      }
+      this.session = this.session
+        ? this.storage.updateNickname(this.session, nickname)
+        : this.storage.createSession(this.bootstrapData.currentRound.roundId, nickname);
+      this.editingNickname = false;
+      this.message = "";
+      this.render();
+      this.scheduleStatusPoll(true);
     } else if (form.dataset.form === "admin-login") {
       const code = String(formData.get("code") ?? "");
       if (!this.beginAction("admin-login")) return;
@@ -754,32 +764,14 @@ export class StudyApp {
         this.pendingRoundTitle = "";
         return;
       }
-      const previousData = this.bootstrapData;
-      const previousSession = this.session;
-      const previousQuestionIndex = this.currentQuestionIndex;
-      this.bootstrapData = {
-        currentRound: {
-          roundId: "pending-next-round",
-          title,
-          status: "WAITING",
-          date: new Date().toISOString(),
-          questionCount: 20,
-        },
-        questions: [],
-        eligibleForRetest: false,
-      };
-      this.session = null;
-      this.currentQuestionIndex = 0;
-      this.pendingTransition = null;
-      this.message = "";
-      this.render();
       try {
         this.bootstrapData = await this.api.createNextRound(title, adminToken);
+        this.session = null;
+        this.currentQuestionIndex = 0;
+        this.pendingTransition = null;
+        this.pendingRoundTitle = "";
         this.message = "다음 회차가 준비됐어요. 참가자가 대기한 뒤 1차 시험을 시작해주세요.";
       } catch (error) {
-        this.bootstrapData = previousData;
-        this.session = previousSession;
-        this.currentQuestionIndex = previousQuestionIndex;
         const apiError = error as StudyApiError;
         if (apiError.code === "ADMIN_TOKEN_INVALID" || apiError.code === "ADMIN_TOKEN_EXPIRED") {
           sessionStorage.removeItem(ADMIN_TOKEN_KEY);
@@ -817,17 +809,9 @@ export class StudyApp {
   }
 
   private async performTransition(targetStatus: RoundStatus): Promise<void> {
-    const previousData = this.bootstrapData;
-    const round = previousData?.currentRound;
+    const round = this.bootstrapData?.currentRound;
     const adminToken = sessionStorage.getItem(ADMIN_TOKEN_KEY);
     if (!round || !adminToken) return;
-    this.bootstrapData = {
-      ...previousData,
-      currentRound: { ...round, status: targetStatus },
-    };
-    this.pendingTransition = null;
-    this.message = "";
-    this.render();
     try {
       const nextData = await this.api.transition(round.roundId, targetStatus, adminToken);
       if (shouldResetQuestionIndex(
@@ -842,7 +826,6 @@ export class StudyApp {
       this.pendingTransition = null;
       this.message = "";
     } catch (error) {
-      this.bootstrapData = previousData;
       this.pendingTransition = targetStatus;
       const apiError = error as StudyApiError;
       if (apiError.code === "ADMIN_TOKEN_INVALID" || apiError.code === "ADMIN_TOKEN_EXPIRED") {

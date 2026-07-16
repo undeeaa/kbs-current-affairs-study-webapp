@@ -1,6 +1,11 @@
 export type RoundStatus = "WAITING" | "FIRST_TEST" | "REVIEW" | "RETEST" | "FINISHED";
 export type Attempt = 1 | 2;
 
+export interface RoundStatusSnapshot {
+  roundId: string | null;
+  status: RoundStatus | null;
+}
+
 export interface PublicQuestion {
   questionId: string;
   order: number;
