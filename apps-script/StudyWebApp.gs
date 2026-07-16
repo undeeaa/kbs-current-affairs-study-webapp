@@ -522,7 +522,11 @@ function KBS_adminLogin(code) {
   var expiresAt = Date.now() + 8 * 60 * 60 * 1000;
   var payload = Utilities.base64EncodeWebSafe(JSON.stringify({ exp: expiresAt, nonce: Utilities.getUuid() })).replace(/=+$/, "");
   var signature = KBS_sign(payload, secret);
-  return { adminToken: payload + "." + signature, expiresAt: new Date(expiresAt).toISOString() };
+  return {
+    adminToken: payload + "." + signature,
+    expiresAt: new Date(expiresAt).toISOString(),
+    bootstrap: KBS_bootstrap(""),
+  };
 }
 
 function KBS_transition(body) {

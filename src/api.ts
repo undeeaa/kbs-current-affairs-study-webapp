@@ -91,7 +91,7 @@ export class StudyApi {
     return this.post("submitAttempt", input as unknown as Record<string, unknown>);
   }
 
-  adminLogin(code: string): Promise<{ adminToken: string; expiresAt: string }> {
+  adminLogin(code: string): Promise<{ adminToken: string; expiresAt: string; bootstrap: BootstrapData }> {
     return this.post("adminLogin", { code });
   }
 

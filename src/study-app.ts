@@ -124,10 +124,11 @@ export class StudyApp {
       useCachedContent = true;
       skipFetch = Date.now() - this.historyFetchedAt < HISTORY_CACHE_MS;
     }
-    this.loading = !useCachedContent;
+    const unauthenticatedAdmin = route === "admin" && !sessionStorage.getItem(ADMIN_TOKEN_KEY);
+    this.loading = unauthenticatedAdmin ? false : !useCachedContent;
     this.message = "";
     this.render();
-    if (skipFetch) return;
+    if (skipFetch || unauthenticatedAdmin) return;
     try {
       if (!route || route === "exam") {
         await this.loadExam(true, controller.signal);
@@ -142,7 +143,7 @@ export class StudyApp {
         this.historyData = await this.api.history(controller.signal);
         this.historyFetchedAt = Date.now();
       } else if (route === "admin") {
-        await this.loadExam(false, controller.signal);
+        this.bootstrapData = await this.api.bootstrap("", controller.signal);
       } else {
         window.location.hash = "#/exam";
       }
@@ -630,9 +631,17 @@ export class StudyApp {
       `;
     }
     const round = this.bootstrapData?.currentRound;
-    if (!round) return this.renderEmpty("관리할 회차가 없어요", "시트에서 새 회차를 준비해주세요.");
-    const target = nextStatus(round.status) as RoundStatus | null;
     const adminBusy = this.pendingAction === "transition" || this.pendingAction === "next-round";
+    if (!round) {
+      return `
+        <section class="narrow-panel admin-panel">
+          <p class="eyebrow">첫 회차</p>
+          ${this.renderNextRoundForm(true)}
+          <button class="button button--text" data-action="admin-logout" type="button" ${adminBusy ? "disabled" : ""}>관리 화면 닫기</button>
+        </section>
+      `;
+    }
+    const target = nextStatus(round.status) as RoundStatus | null;
     const actionLabel: Record<RoundStatus, string> = {
       WAITING: "1차 시험 시작",
       FIRST_TEST: "1차 시험 종료",
@@ -652,19 +661,19 @@ export class StudyApp {
     `;
   }
 
-  private renderNextRoundForm(): string {
+  private renderNextRoundForm(firstRound = false): string {
     const busy = this.pendingAction === "next-round";
     const suggestedTitle = `${formatDate(new Date().toISOString())} 시사상식 시험`;
     return `
       <form class="stack next-round-panel" data-form="next-round">
         <div>
-          <h2>다음 회차를 준비할까요?</h2>
+          <h2>${firstRound ? "새 회차를 준비할까요?" : "다음 회차를 준비할까요?"}</h2>
           <p>아직 출제하지 않은 문제 중 20개를 시트 순서대로 구성해요.</p>
         </div>
         <label class="field-label" for="next-round-title">회차 제목</label>
         <input id="next-round-title" name="title" maxlength="80" required ${busy ? "disabled" : ""}
           value="${escapeHtml(this.pendingRoundTitle || suggestedTitle)}" />
-        <button class="button button--primary" type="submit" ${busy ? "disabled" : ""}>${busy ? '<span class="spinner" aria-hidden="true"></span> 준비하고 있어요' : "다음 회차 준비하기"}</button>
+        <button class="button button--primary" type="submit" ${busy ? "disabled" : ""}>${busy ? '<span class="spinner" aria-hidden="true"></span> 준비하고 있어요' : firstRound ? "새 회차 준비하기" : "다음 회차 준비하기"}</button>
       </form>
     `;
   }
@@ -749,6 +758,7 @@ export class StudyApp {
       try {
         const result = await this.api.adminLogin(code);
         sessionStorage.setItem(ADMIN_TOKEN_KEY, result.adminToken);
+        this.bootstrapData = result.bootstrap;
         this.message = "";
       } catch (error) {
         this.message = this.friendlyError(error, "관리자 코드를 확인해주세요.");

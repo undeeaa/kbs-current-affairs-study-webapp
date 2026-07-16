@@ -6,7 +6,15 @@ describe("API 계약", () => {
 
   it("POST를 사전 요청이 필요 없는 text/plain JSON으로 보낸다", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ ok: true, data: { adminToken: "token", expiresAt: "later" }, serverTime: "now" })),
+      new Response(JSON.stringify({
+        ok: true,
+        data: {
+          adminToken: "token",
+          expiresAt: "later",
+          bootstrap: { currentRound: null, questions: [], eligibleForRetest: false },
+        },
+        serverTime: "now",
+      })),
     );
     const api = new StudyApi("https://script.google.com/macros/s/example/exec");
     await api.adminLogin("secret-code");
